@@ -4,6 +4,7 @@ import cats.effect.*
 import cats.effect.std.Console
 import cats.syntax.all.*
 import com.comcast.ip4s.*
+import dumbo.Dumbo
 import fs2.io.net.Network
 import io.circe.Codec
 import io.circe.derivation.Configuration
@@ -52,21 +53,49 @@ class DBLoader extends Loader:
     ): Resource[F, DB[F]] =
         import context.*
         for
-            _       <- Resource.eval(logger.info("Loading DB module"))
-            config  <- Resource.eval(configReader.read[DatabaseConfig]("db"))
-            poolRes <- Session.pooled[F](
-                         host = config.host.toString,
-                         port = config.port.value,
-                         database = config.database,
-                         user = config.username,
-                         password = config.password.some.map(_.value),
-                         max = config.poolSize,
-                         debug = config.debug
-                       )
-            _       <- Resource.eval(logger.info("DB module loaded"))
+            _        <- Resource.eval(logger.info("Loading DB module"))
+            config   <- Resource.eval(configReader.read[DatabaseConfig]("db"))
+            poolRes  <- Session.pooled[F](
+                          host = config.host.toString,
+                          port = config.port.value,
+                          database = config.database,
+                          user = config.username,
+                          password = config.password.some.map(_.value),
+                          max = config.poolSize,
+                          debug = config.debug
+                        )
+            _        <- Resource.eval(logger.info("DB module loaded"))
+            _        <- Resource.eval(logger.info("Starting Database Migration"))
+            files     = config.migrationFolder
+            migrator <- Resource.eval(getMigrator(config).runMigration)
+            _        <- Resource.eval(logger.info("Finish Database Migration"))
         yield DB(poolRes)
         end for
     end load
+
+    /**
+     * For some reasons it's impossible to have files from multiples sources in Dumbo so Only one path is accepted
+     *
+     * @param migrationFolder
+     * @return
+     */
+    def getMigrator[F[_]: Sync: Temporal: Console: Tracer: Network](config: DatabaseConfig) =
+        Dumbo.withResourcesIn[F]("db/migration").apply(
+          connection = dumbo.ConnectionConfig(
+            config.host.toString,
+            config.port.toString.toInt,
+            config.username,
+            config.database,
+            Some(config.password.toString)
+          ),
+          defaultSchema = "public",
+          schemas = Set.empty,
+          schemaHistoryTable = "flyway_schema_history",
+          validateOnMigrate = true
+        )
+
+    def javaNiotoFS2Path(original: java.nio.file.Path): fs2.io.file.Path =
+        fs2.io.file.Path(original.toAbsolutePath.getFileName.toString)
 end DBLoader
 
 final case class DatabaseConfig(
@@ -76,6 +105,7 @@ final case class DatabaseConfig(
     username: DatabaseUser,
     password: Secret[DatabasePassword],
     poolSize: PoolSize = PoolSize(32),
+    migrationFolder: java.nio.file.Path,
     debug: Boolean = false,
     probe: ProbeConfig
 )
